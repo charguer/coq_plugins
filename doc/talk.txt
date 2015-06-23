@@ -1,0 +1,219 @@
+
+
+The system is quite complicated.
+
+Somewhere at the bottom is the kernel is known.
+The main data structure is the one of terms "constr.ml".
+
+OCaml type "kind" is opaque. You apply a view to it in order to investigate it.
+
+Evar is a unification variable, used to represent goals, Meta should ideally disappear.
+
+Types and terms are the same thing in Coq, but "types" and "constr" are aliases useful for documentation.
+
+Locally nameless representation is used: names for above the bar, and de Bruijn indices for locally bound variables.
+De Bruijn count backwards the number of abstractions to cross, starting from 1 --zero is not a valid index!
+
+To add a constant, use the "add_constant" function, which gives a "safe_transformer", which is a function
+that takes a safe environment and returns another safe environment, together with the name of the new definition.
+
+The only way to build environments is to start from the abstract empty environment and to extend it this way.
+Thus, only well-typed definitions belong to a safe environment.
+
+The environment contains the global and the local context in which we are working.
+
+In type-checking, we do two important things: traversing terms, and comparing types.
+To compare types, in "reduction.ml", we use the type conversion function of type "conversion_function",
+for example, "conv_leq" is used for applications.
+
+Applications are nary (arguments represented as a reverse list) and handled by the function
+"judge_of_apply" in "fast_type_ops.ml". In the code, we look at the type of the function,
+after reduction, and check it is a product (else return an error). And we check that type
+of the arguments matches the argument of the product, and if so we do the substitution.
+
+Note that the function "whd_betadeltaiota" does "zeta" and there is another function for not doing zeta
+--for historical reasons!
+
+The "safe_typing.ml" in the kernel does not really handle the "underscore" (holes). 
+The rest of the system takes care of these. 
+
+The function "the_conv_x" takes an evar map and produces an evar map. See "evd.ml".
+The evar_map maps informations to the evar: the type of it and the context in which it lives,
+and possibly a body if it has already been instantiated.
+
+A goal in the system is actually one of these unification variables.
+The type is the statement of the goal, and once we have the proof term this becomes the body of the evar.
+
+Note that "the_conv" comes from Chuck Murphy and no one changed it ever since (appart from adding "_x")!
+
+
+In "pretyping.ml", "ise_pretype_gen" is a function that does type inference and not just type checking. 
+It takes an environment and it is able to make the evar_map evolve during the typechecking of a term.
+
+Other functions are expecting an "evar_map ref" as argument and modify it, but the underlying data
+structure is always purely functional. It should grow monotically in theory, even though in practice
+it is not always the case.
+
+Invariant: a term that comes out of pretyping.ml should normally typecheck successfully in the kernel.
+Invariant: in the recent implementation, universes are checked in pretyping, but not the guard condition,
+which is only done in the kernel.
+
+
+Phases in parsing a definition: [see corresponding slide]
+- start from a string
+- parse it and get a "constr_expr" object (AST, with locations); custom notations are recognized but not interpreted yet
+- internalization (takes care of notations, globalization of names, implicit args) leads to a "glob_constr" object, untyped, with deep patterns
+- then pretyping (turn local names into de Bruijn indices, resolves constructors, resolves implicit types, coercions, canonical structures, encode deep patterns, infer return clauses ...) and produces a typed "constr" object.
+
+There is a way back to type things, going through the same data structures.
+- detyping replaces de Bruijn indices by names, and deep pattern matching is decompiled
+- externalization reintroduces custom notations, implicit arguments, and also eliminates coercions (non symmetric since they were introduced by pretyping)
+- printing turns the AST into a string
+
+
+Front-end: vernac.ml
+- call the interpreter on the next main sentence
+
+Parsing: g_vernac.* vernac_expr constr_expr
+- syntax of Camlp4, with the pattern, and then the object produced
+- on the left, name of the thing being bound
+- e.g. with "def_token"
+- need to give precedences
+- To understand what the system does when typing a command, look at the command, e.g. "VernacDefinition",
+   see the arguments, and then look at how it is evaluated.
+
+Interpreter: vernacentries.ml
+- as a case for each AST constructor, call the appropriate function
+- eg Vernac Definition => "let vernac_definition ...." : if no body start a proof, if there is a body, do that.
+- mechanism "dump_glob" creates information for coqdoc; modern version uses a bus for feedback
+- in the frontend we can subscribe to the bus, in order to collect the information
+- bus is useful to send information that is not stored in the data structures
+- flexible as it takes arbitrary pieces of data in xml
+
+Internalization: constrintern.ml; function "internalize"
+- eg uses "apply_impargs" to pad implicit arguments on references
+- "declare_numeral_interpreter" allows to hook custom parser/printer for numerical data types for example bigint (see prim_token_interpreter).
+
+Type inference: 
+- case |GLambda typecheck the body in a context with one more item "let var = (name,None,j.utj_val) in ... (push_rel var env) ..."
+
+Going back: 
+- function "extern_constr_gen", implemented using "let rec extern ..." 
+- for example remove coercions
+- for example try to match notations
+- else recursively traverse the term and print
+
+
+
+Demo: 
+-> mettre dans le path le coq qu'on utilise, et utiliser le coqmakefile correspondant
+- https://github.com/gares/example_plugin
+- add one tactic (intro) and one vernac command (print).
+- simple tactic that produces a lambda expression.
+- mkdir theoreies
+- vim _CoqProject theories/myplug.v src/myplug.mllib src/myplug.ml4
+- fill in content of _CoqProject (tofill) with all files, including the v file
+- in the plugin, only declare the code "Declare ML code ..."
+- in the mllib file, "Myplug" => name of caml units that should be linked
+- in the ml4 file: begin with a line to register the plugin, using "add_known_plugin"
+- coq_makefile -f _CoqProject -o Makefile
+- make
+- in the /src directory, we have the compiled myplug.cmx
+- coqide will find the plugin because it shows in the _CoqProject; else we'd need a "-I" flag.
+-> preferences -> project -> first choice
+- ou bien: ~/softs/coqdev/bin/coqide  -R "theories" myplug -I "src"  theories/test.v &
+
+
+
+Definition of tactic myintro:
+- adding a tactic binding "myintro", using TACTIC EXTEND
+- ideally the "open" should be packaged into just one
+- "Goal.nf_enter (fun g -> ...)"  is to access the current goal
+- we want to produce a term that starts with a lambda, e.g. "fun x : _ => _ )"
+- "let underscore = .. " and "let lambda id = ..."
+- Refine.refine (fun sigma => ...) , where sigma is the typical name for evar maps, and we should return a sigma'
+- "let env = Goal.env g in"
+- "let concl = Goal.concl g in"
+- "ise_pretype_gen" returns a pair of a term and a sigma
+- "let myintros ids = tclTHENLIST (List.map myintro ids)" combinator to simulate for semicolumns, and process multiple arguments
+
+Definition of "Print" command.
+- "vernac extend", classified as ..."query" in this case
+- "Smartlocalte.global_with_alias" resolves to the fully qualified reference associated with the name
+- to report an error, use Errors.errorlabstrmx  
+
+=================================================
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
